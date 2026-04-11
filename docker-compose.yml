@@ -1,0 +1,11 @@
+services:
+  zai-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zai-proxy
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

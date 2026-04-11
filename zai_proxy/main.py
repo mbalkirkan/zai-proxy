@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import time
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+
+from .client import ZaiClient, ZaiUpstreamError
+from .config import Settings
+from .schemas import (
+    ChatCompletionsRequest,
+    ChatCompletionsResponse,
+    Choice,
+    ModelCard,
+    ModelsResponse,
+    OpenAIMessage,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseUsage,
+    Usage,
+)
+
+
+settings = Settings.from_env()
+client = ZaiClient(settings)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    await client.close()
+
+
+app = FastAPI(title="z.ai OpenAI Proxy", version="0.1.0", lifespan=lifespan)
+
+
+def require_api_key(authorization: str | None = Header(default=None)) -> None:
+    if not settings.proxy_api_key:
+        return
+
+    expected = f"Bearer {settings.proxy_api_key}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+@app.get("/")
+async def root() -> dict:
+    return {
+        "name": "z.ai OpenAI Proxy",
+        "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/responses", "/healthz"],
+    }
+
+
+@app.get("/healthz")
+async def healthz(_: None = Depends(require_api_key)) -> dict:
+    try:
+        data = await client.healthcheck()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "upstream": data}
+
+
+@app.get("/v1/models", response_model=ModelsResponse)
+async def list_models(_: None = Depends(require_api_key)) -> ModelsResponse:
+    try:
+        upstream_models = await client.list_models()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    models = [
+        ModelCard(
+            id=(model.get("openai") or {}).get("id") or model.get("id"),
+            owned_by=model.get("owned_by") or "z.ai",
+        )
+        for model in upstream_models
+    ]
+    return ModelsResponse(data=models)
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionsResponse)
+async def chat_completions(
+    request: ChatCompletionsRequest,
+    _: None = Depends(require_api_key),
+) -> ChatCompletionsResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    try:
+        completion = await client.complete(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ZaiUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    usage = completion.usage or {}
+    return ChatCompletionsResponse(
+        id=completion.id,
+        created=int(time.time()),
+        model=completion.model,
+        choices=[
+            Choice(
+                index=0,
+                message=OpenAIMessage(role="assistant", content=completion.content),
+                finish_reason="stop",
+            )
+        ],
+        usage=Usage(
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        ),
+    )
+
+
+@app.post("/v1/responses", response_model=ResponsesResponse)
+async def responses(
+    request: ResponsesRequest,
+    _: None = Depends(require_api_key),
+) -> ResponsesResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    try:
+        chat_request = _responses_to_chat_request(request)
+        completion = await client.complete(chat_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ZaiUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    usage = completion.usage or {}
+    return ResponsesResponse(
+        id="resp_" + completion.id.removeprefix("chatcmpl-"),
+        created_at=int(time.time()),
+        model=completion.model,
+        output=[
+            ResponseOutputMessage(
+                id="msg_" + completion.id.removeprefix("chatcmpl-"),
+                content=[ResponseOutputText(text=completion.content)],
+            )
+        ],
+        output_text=completion.content,
+        usage=ResponseUsage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        ),
+        metadata=request.metadata,
+    )
+
+
+def _responses_to_chat_request(request: ResponsesRequest) -> ChatCompletionsRequest:
+    messages = _normalize_responses_input(request.input)
+    if request.instructions:
+        messages.insert(0, {"role": "system", "content": request.instructions})
+
+    return ChatCompletionsRequest(
+        model=request.model,
+        messages=messages,
+        max_tokens=request.max_output_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        stream=False,
+        user=request.user,
+        metadata=request.metadata,
+    )
+
+
+def _normalize_responses_input(input_value: Any) -> list[dict[str, Any]]:
+    if isinstance(input_value, str):
+        return [{"role": "user", "content": input_value}]
+
+    if not isinstance(input_value, list) or not input_value:
+        raise ValueError("responses.input must be a string or a non-empty list")
+
+    messages: list[dict[str, Any]] = []
+    for item in input_value:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+
+        if not isinstance(item, dict):
+            raise ValueError("Unsupported responses input item")
+
+        role = item.get("role")
+        if item.get("type") == "message" and role:
+            messages.append(
+                {
+                    "role": _normalize_role(role),
+                    "content": _extract_responses_content(item.get("content")),
+                }
+            )
+            continue
+
+        if role:
+            messages.append(
+                {
+                    "role": _normalize_role(role),
+                    "content": _extract_responses_content(item.get("content")),
+                }
+            )
+            continue
+
+        messages.append(
+            {
+                "role": "user",
+                "content": _extract_responses_content([item]),
+            }
+        )
+
+    return messages
+
+
+def _normalize_role(role: str) -> str:
+    if role == "developer":
+        return "system"
+    if role not in {"system", "user", "assistant"}:
+        raise ValueError(f"Unsupported role: {role}")
+    return role
+
+
+def _extract_responses_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ValueError("Unsupported responses content format")
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+
+        if not isinstance(item, dict):
+            raise ValueError("Unsupported responses content part")
+
+        item_type = item.get("type")
+        if item_type in {"input_text", "text", "output_text"}:
+            parts.append(item.get("text") or "")
+            continue
+
+        raise ValueError(f"Unsupported responses content part type: {item_type}")
+
+    return "\n".join(part for part in parts if part).strip()
