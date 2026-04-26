@@ -105,3 +105,65 @@ def test_block_page_is_mapped_to_clear_error():
 
     assert error.status_code == 503
     assert "blocked the current ip" in str(error).lower()
+
+
+def test_messages_from_chat_returns_current_linear_history():
+    chat_data = {
+        "id": "chat-1",
+        "chat": {
+            "history": {
+                "currentId": "a2",
+                "messages": {
+                    "u1": {
+                        "id": "u1",
+                        "parentId": None,
+                        "role": "user",
+                        "content": "hello",
+                    },
+                    "a1": {
+                        "id": "a1",
+                        "parentId": "u1",
+                        "role": "assistant",
+                        "content": "hi",
+                    },
+                    "u2": {
+                        "id": "u2",
+                        "parentId": "a1",
+                        "role": "user",
+                        "content": "again",
+                    },
+                    "a2": {
+                        "id": "a2",
+                        "parentId": "u2",
+                        "role": "assistant",
+                        "content": "done",
+                    },
+                },
+            }
+        },
+    }
+
+    assert ZaiClient._messages_from_chat(chat_data) == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def test_seed_from_existing_chat_uses_current_id_as_parent():
+    chat_data = {
+        "id": "chat-1",
+        "chat": {
+            "history": {
+                "currentId": "assistant-last",
+                "messages": {},
+            }
+        },
+    }
+
+    seed = ZaiClient._seed_from_existing_chat(chat_data)
+
+    assert seed.chat_id == "chat-1"
+    assert seed.current_user_message_parent_id == "assistant-last"
+    assert seed.current_user_message_id

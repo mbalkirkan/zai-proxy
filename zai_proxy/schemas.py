@@ -40,6 +40,18 @@ class ResponsesRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class ZaiChatRequest(BaseModel):
+    prompt: str
+    chat_id: str | None = None
+    model: str | None = None
+    system: str | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    stop: str | list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class OpenAIMessage(BaseModel):
     role: Literal["assistant"]
     content: str
@@ -109,3 +121,21 @@ class ResponsesResponse(BaseModel):
     error: None = None
     incomplete_details: None = None
     metadata: dict[str, Any] | None = None
+
+
+class ZaiChatResponse(BaseModel):
+    id: str
+    object: Literal["zai.chat.completion"] = "zai.chat.completion"
+    created: int
+    chat_id: str
+    model: str
+    answer: str
+    usage: dict[str, Any] = Field(default_factory=dict)
+    reasoning: str = ""
+    new_chat: bool
+    metadata: dict[str, Any] | None = None
+
+
+class ZaiDeleteChatResponse(BaseModel):
+    chat_id: str
+    deleted: bool

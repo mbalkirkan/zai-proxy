@@ -21,6 +21,9 @@ from .schemas import (
     ResponseOutputText,
     ResponseUsage,
     Usage,
+    ZaiChatRequest,
+    ZaiChatResponse,
+    ZaiDeleteChatResponse,
 )
 
 
@@ -50,7 +53,13 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
 async def root() -> dict:
     return {
         "name": "z.ai OpenAI Proxy",
-        "endpoints": ["/v1/models", "/v1/chat/completions", "/v1/responses", "/healthz"],
+        "endpoints": [
+            "/v1/models",
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/zai/chat",
+            "/healthz",
+        ],
     }
 
 
@@ -154,6 +163,64 @@ async def responses(
         ),
         metadata=request.metadata,
     )
+
+
+@app.post("/zai/chat", response_model=ZaiChatResponse)
+async def zai_chat(
+    request: ZaiChatRequest,
+    _: None = Depends(require_api_key),
+) -> ZaiChatResponse:
+    prompt = request.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    try:
+        completion = await client.complete_stateful(
+            prompt=prompt,
+            chat_id=request.chat_id,
+            model=request.model,
+            system=request.system,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            stop=request.stop,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ZaiUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not completion.chat_id:
+        raise HTTPException(status_code=502, detail="z.ai did not return a chat id")
+
+    return ZaiChatResponse(
+        id=completion.id,
+        created=int(time.time()),
+        chat_id=completion.chat_id,
+        model=completion.model,
+        answer=completion.content,
+        usage=completion.usage or {},
+        reasoning=completion.reasoning,
+        new_chat=completion.created_chat,
+        metadata=request.metadata,
+    )
+
+
+@app.delete("/zai/chat/{chat_id}", response_model=ZaiDeleteChatResponse)
+async def delete_zai_chat(
+    chat_id: str,
+    _: None = Depends(require_api_key),
+) -> ZaiDeleteChatResponse:
+    try:
+        deleted = await client.delete_chat(chat_id)
+    except ZaiUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return ZaiDeleteChatResponse(chat_id=chat_id, deleted=deleted)
 
 
 def _responses_to_chat_request(request: ResponsesRequest) -> ChatCompletionsRequest:

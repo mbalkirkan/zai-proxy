@@ -29,6 +29,8 @@ class UpstreamCompletion:
     content: str
     usage: dict
     reasoning: str
+    chat_id: str | None = None
+    created_chat: bool = False
 
 
 @dataclass(slots=True)
@@ -110,6 +112,18 @@ class ZaiClient:
         body = res.text.strip().lower()
         return body in {"true", '"true"'} or res.status_code == 200
 
+    async def get_chat(self, chat_id: str) -> dict:
+        res = await self._send(
+            "GET",
+            f"https://chat.z.ai/api/v1/chats/{chat_id}",
+            headers=self._base_headers(),
+        )
+        self._raise_for_http_error(res)
+        data = res.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Unexpected chat response from z.ai")
+        return data
+
     async def complete(self, request: ChatCompletionsRequest) -> UpstreamCompletion:
         if any(message.role == "tool" for message in request.messages):
             raise ValueError("tool role messages are not supported by this proxy")
@@ -118,7 +132,55 @@ class ZaiClient:
             {"role": message.role, "content": extract_text_content(message.content)}
             for message in request.messages
         ]
-        message_texts = self._normalize_messages_for_upstream(raw_messages)
+        return await self._complete_turn(
+            messages=raw_messages,
+            model=request.model,
+            params=self._build_params(request),
+            chat_id=None,
+            delete_after_response=self.settings.delete_chat_after_response,
+        )
+
+    async def complete_stateful(
+        self,
+        *,
+        prompt: str,
+        chat_id: str | None = None,
+        model: str | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        stop: str | list[str] | None = None,
+    ) -> UpstreamCompletion:
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        return await self._complete_turn(
+            messages=messages,
+            model=model,
+            params=self._build_params_dict(
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+            ),
+            chat_id=chat_id,
+            delete_after_response=False,
+        )
+
+    async def _complete_turn(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None,
+        params: dict,
+        chat_id: str | None,
+        delete_after_response: bool,
+    ) -> UpstreamCompletion:
+        existing_chat = await self.get_chat(chat_id) if chat_id else None
+        message_texts = self._normalize_messages_for_upstream(messages)
 
         if not message_texts:
             raise ValueError("At least one message is required")
@@ -129,20 +191,31 @@ class ZaiClient:
         if not last_user:
             raise ValueError("At least one user message is required")
 
-        model_id = await self._resolve_model(request.model or self.settings.default_model)
+        model_id = await self._resolve_model(
+            model or self._model_from_chat(existing_chat) or self.settings.default_model
+        )
         model_info = await self._get_model_info(model_id)
         feature_bundle = self._build_feature_bundle(model_info)
 
         last_error: Exception | None = None
         for attempt in range(self._capacity_retries):
-            chat_id: str | None = None
+            active_chat_id: str | None = None
+            created_chat = False
+            success = False
             try:
-                chat_seed = await self._create_chat(
-                    model_id=model_id,
-                    messages=message_texts,
-                    feature_bundle=feature_bundle,
-                )
-                chat_id = chat_seed.chat_id
+                if existing_chat is not None:
+                    chat_seed = self._seed_from_existing_chat(existing_chat)
+                    completion_messages = self._messages_from_chat(existing_chat) + message_texts
+                else:
+                    chat_seed = await self._create_chat(
+                        model_id=model_id,
+                        messages=message_texts,
+                        feature_bundle=feature_bundle,
+                    )
+                    completion_messages = message_texts
+                    created_chat = True
+
+                active_chat_id = chat_seed.chat_id
 
                 timestamp_ms = str(ms_now())
                 request_id = new_id()
@@ -156,9 +229,9 @@ class ZaiClient:
                 body = {
                     "stream": False,
                     "model": model_id,
-                    "messages": message_texts,
+                    "messages": completion_messages,
                     "signature_prompt": last_user,
-                    "params": self._build_params(request),
+                    "params": params,
                     "extra": feature_bundle["extra"],
                     "features": feature_bundle["completion_features"],
                     "variables": self._build_variables(),
@@ -182,12 +255,15 @@ class ZaiClient:
                 if not parsed.answer:
                     raise ZaiUpstreamError("z.ai returned no answer content")
 
+                success = True
                 return UpstreamCompletion(
                     id="chatcmpl-" + new_id(),
                     model=model_id,
                     content=parsed.answer,
                     usage=parsed.usage,
                     reasoning=parsed.reasoning,
+                    chat_id=chat_seed.chat_id,
+                    created_chat=created_chat,
                 )
             except ZaiCapacityError as exc:
                 last_error = exc
@@ -197,9 +273,10 @@ class ZaiClient:
             except httpx.HTTPStatusError as exc:
                 raise self._http_status_to_error(exc.response) from exc
             finally:
-                if chat_id and self.settings.delete_chat_after_response:
+                should_delete_failed_new_chat = created_chat and not success and not delete_after_response
+                if active_chat_id and (delete_after_response or should_delete_failed_new_chat):
                     with suppress(Exception):
-                        await self.delete_chat(chat_id)
+                        await self.delete_chat(active_chat_id)
 
         raise ZaiUpstreamError(str(last_error or "Unknown upstream error"))
 
@@ -319,6 +396,58 @@ class ZaiClient:
 
         return history_messages, current_id, current_user_message_id, current_user_message_parent_id
 
+    @staticmethod
+    def _model_from_chat(chat_data: dict | None) -> str | None:
+        if not chat_data:
+            return None
+
+        chat = chat_data.get("chat") or {}
+        models = chat.get("models") or (chat_data.get("meta") or {}).get("models") or []
+        if isinstance(models, list) and models:
+            return str(models[0])
+        return None
+
+    @staticmethod
+    def _seed_from_existing_chat(chat_data: dict) -> ChatSeed:
+        chat_id = str(chat_data.get("id") or (chat_data.get("chat") or {}).get("id") or "").strip()
+        history = ((chat_data.get("chat") or {}).get("history") or {})
+        parent_id = history.get("currentId")
+
+        if not chat_id:
+            raise ValueError("Existing chat response is missing chat id")
+        if not parent_id:
+            raise ValueError("Existing chat has no current message to continue from")
+
+        return ChatSeed(
+            chat_id=chat_id,
+            current_user_message_id=new_id(),
+            current_user_message_parent_id=str(parent_id),
+        )
+
+    @staticmethod
+    def _messages_from_chat(chat_data: dict) -> list[dict[str, str]]:
+        history = ((chat_data.get("chat") or {}).get("history") or {})
+        messages_by_id = history.get("messages") or {}
+        current_id = history.get("currentId")
+        chain: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        while current_id and current_id not in seen:
+            seen.add(str(current_id))
+            message = messages_by_id.get(current_id)
+            if not isinstance(message, dict):
+                break
+
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "").strip()
+            if role in {"system", "user", "assistant"} and content:
+                chain.append({"role": role, "content": content})
+
+            current_id = message.get("parentId")
+
+        chain.reverse()
+        return chain
+
     def _build_feature_bundle(self, model_info: dict) -> dict:
         caps = (((model_info.get("info") or {}).get("meta") or {}).get("capabilities") or {})
 
@@ -406,15 +535,30 @@ class ZaiClient:
         }
 
     def _build_params(self, request: ChatCompletionsRequest) -> dict:
+        return self._build_params_dict(
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            stop=request.stop,
+        )
+
+    @staticmethod
+    def _build_params_dict(
+        *,
+        max_tokens: int | None,
+        temperature: float | None,
+        top_p: float | None,
+        stop: str | list[str] | None,
+    ) -> dict:
         params: dict = {}
-        if request.max_tokens is not None:
-            params["max_tokens"] = request.max_tokens
-        if request.temperature is not None:
-            params["temperature"] = request.temperature
-        if request.top_p is not None:
-            params["top_p"] = request.top_p
-        if request.stop is not None:
-            params["stop"] = request.stop
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if temperature is not None:
+            params["temperature"] = temperature
+        if top_p is not None:
+            params["top_p"] = top_p
+        if stop is not None:
+            params["stop"] = stop
         return params
 
     def _build_query_params(self, *, timestamp_ms: str, request_id: str) -> str:

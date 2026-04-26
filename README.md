@@ -6,6 +6,8 @@ OpenAI-compatible `/v1` proxy for `chat.z.ai`. The server accepts both `POST /v1
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /zai/chat`
+- `DELETE /zai/chat/{chat_id}`
 - `GET /v1/models`
 - `GET /healthz`
 - Non-stream responses only
@@ -99,6 +101,45 @@ curl http://localhost:8000/v1/responses \
   }'
 ```
 
+## Stateful z.ai chat
+
+Use `/zai/chat` when you want to keep a z.ai chat alive and continue it later.
+This endpoint is not OpenAI-compatible on purpose.
+
+Create a persistent chat:
+
+```bash
+curl http://localhost:8000/zai/chat \
+  -H 'Authorization: Bearer YOUR_PROXY_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "GLM-5-Turbo",
+    "system": "Be concise.",
+    "prompt": "Remember this codeword: blue-lake. Reply OK."
+  }'
+```
+
+Continue the same chat:
+
+```bash
+curl http://localhost:8000/zai/chat \
+  -H 'Authorization: Bearer YOUR_PROXY_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "chat_id": "CHAT_ID_FROM_PREVIOUS_RESPONSE",
+    "prompt": "What codeword did I give you?"
+  }'
+```
+
+The response includes `chat_id`. This chat is not deleted automatically.
+
+Delete a persistent chat when you are done:
+
+```bash
+curl -X DELETE http://localhost:8000/zai/chat/CHAT_ID_FROM_PREVIOUS_RESPONSE \
+  -H 'Authorization: Bearer YOUR_PROXY_TOKEN'
+```
+
 ## n8n
 
 Use the base URL:
@@ -117,6 +158,7 @@ Authorization: Bearer YOUR_PROXY_TOKEN
 
 - This proxy currently creates a fresh z.ai chat for each request.
 - That temporary chat is deleted after the response by default.
+- `/zai/chat` is the exception: it keeps the chat until you delete it.
 - It does not support `stream=true` on either endpoint.
 - It only supports text content parts.
 
