@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -11,7 +12,7 @@ load_dotenv()
 
 @dataclass(slots=True)
 class Settings:
-    zai_token: str
+    zai_token: str | None
     default_model: str
     fe_version: str
     proxy_api_key: str | None
@@ -19,6 +20,15 @@ class Settings:
     min_request_interval_ms: int
     enable_thinking: bool
     auto_web_search: bool
+    deepseek_token: str | None
+    deepseek_cookie: str | None
+    deepseek_default_model: str
+    deepseek_delete_chat_after_response: bool
+    deepseek_min_request_interval_ms: int
+    deepseek_thinking_enabled: bool
+    deepseek_search_enabled: bool
+    deepseek_client_version: str
+    deepseek_app_version: str
     user_name: str
     user_location: str
     context_timezone: str
@@ -27,9 +37,10 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        token = os.getenv("ZAI_TOKEN", "").strip()
-        if not token:
-            raise RuntimeError("ZAI_TOKEN is required")
+        token = os.getenv("ZAI_TOKEN", "").strip() or None
+        deepseek_token = _normalize_deepseek_token(os.getenv("DEEPSEEK_TOKEN", ""))
+        if not token and not deepseek_token:
+            raise RuntimeError("ZAI_TOKEN or DEEPSEEK_TOKEN is required")
 
         return cls(
             zai_token=token,
@@ -46,6 +57,22 @@ class Settings:
             min_request_interval_ms=max(0, int(os.getenv("ZAI_MIN_REQUEST_INTERVAL_MS", "2000"))),
             enable_thinking=_as_bool(os.getenv("ZAI_ENABLE_THINKING", "false")),
             auto_web_search=_as_bool(os.getenv("ZAI_AUTO_WEB_SEARCH", "false")),
+            deepseek_token=deepseek_token,
+            deepseek_cookie=os.getenv("DEEPSEEK_COOKIE", "").strip() or None,
+            deepseek_default_model=os.getenv("DEEPSEEK_MODEL", "default").strip() or "default",
+            deepseek_delete_chat_after_response=_as_bool(
+                os.getenv("DEEPSEEK_DELETE_CHAT_AFTER_RESPONSE", "true")
+            ),
+            deepseek_min_request_interval_ms=max(
+                0,
+                int(os.getenv("DEEPSEEK_MIN_REQUEST_INTERVAL_MS", "2000")),
+            ),
+            deepseek_thinking_enabled=_as_bool(
+                os.getenv("DEEPSEEK_THINKING_ENABLED", "true")
+            ),
+            deepseek_search_enabled=_as_bool(os.getenv("DEEPSEEK_SEARCH_ENABLED", "false")),
+            deepseek_client_version=os.getenv("DEEPSEEK_CLIENT_VERSION", "1.8.0").strip(),
+            deepseek_app_version=os.getenv("DEEPSEEK_APP_VERSION", "20241129.1").strip(),
             user_name=os.getenv("ZAI_USER_NAME", "").strip(),
             user_location=os.getenv("ZAI_USER_LOCATION", "Unknown").strip() or "Unknown",
             context_timezone=os.getenv("ZAI_CONTEXT_TIMEZONE", "Europe/Istanbul").strip(),
@@ -56,3 +83,23 @@ class Settings:
 
 def _as_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_deepseek_token(value: str) -> str | None:
+    token = value.strip()
+    if not token:
+        return None
+
+    if token.startswith("Bearer "):
+        token = token.removeprefix("Bearer ").strip()
+
+    if token.startswith("{"):
+        try:
+            parsed = json.loads(token)
+        except json.JSONDecodeError:
+            return token
+        if isinstance(parsed, dict):
+            candidate = str(parsed.get("value") or "").strip()
+            return candidate or None
+
+    return token

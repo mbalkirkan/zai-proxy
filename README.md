@@ -1,6 +1,6 @@
-# z.ai OpenAI Proxy
+# z.ai and DeepSeek OpenAI Proxy
 
-OpenAI-compatible `/v1` proxy for `chat.z.ai`. The server accepts both `POST /v1/chat/completions` and `POST /v1/responses` requests and forwards them to z.ai using your logged-in token.
+OpenAI-compatible proxy for `chat.z.ai` and `chat.deepseek.com`. z.ai uses `/v1`; DeepSeek uses `/deepseek/v1`.
 
 ## What it supports
 
@@ -9,10 +9,15 @@ OpenAI-compatible `/v1` proxy for `chat.z.ai`. The server accepts both `POST /v1
 - `POST /zai/chat`
 - `DELETE /zai/chat/{chat_id}`
 - `GET /v1/models`
+- `POST /deepseek/v1/chat/completions`
+- `POST /deepseek/v1/responses`
+- `GET /deepseek/v1/models`
 - `GET /healthz`
+- `GET /deepseek/healthz`
 - Non-stream responses only
 - Text-only messages
 - `system` / `developer` instructions are folded into the next user turn for z.ai compatibility
+- DeepSeek uses a rendered single prompt for message history because the web endpoint accepts one prompt per turn
 - Automatic retry on temporary upstream capacity errors
 - Automatic chat cleanup after each response
 - Built-in request spacing to reduce IP-ban risk from burst traffic
@@ -21,7 +26,7 @@ OpenAI-compatible `/v1` proxy for `chat.z.ai`. The server accepts both `POST /v1
 
 1. Create a virtual environment.
 2. Install dependencies from `requirements.txt`.
-3. Copy `.env.example` to `.env` and set `ZAI_TOKEN`.
+3. Copy `.env.example` to `.env` and set `ZAI_TOKEN`, `DEEPSEEK_TOKEN`, or both.
 4. Start the server.
 
 Optional tuning:
@@ -29,6 +34,9 @@ Optional tuning:
 - `ZAI_DELETE_CHAT_AFTER_RESPONSE=true` keeps temporary chats from piling up
 - `ZAI_MIN_REQUEST_INTERVAL_MS=2000` spaces outbound z.ai requests to avoid bursts
 - `PROXY_BEARER_TOKEN=...` enables bearer protection for incoming requests
+- `DEEPSEEK_TOKEN=...` is the DeepSeek `localStorage.userToken.value`
+- `DEEPSEEK_COOKIE=...` is optional, but may be required if DeepSeek/Cloudflare rejects server-side requests
+- `DEEPSEEK_MODEL=default` maps to Instant; `expert` maps to Expert
 
 ## Run
 
@@ -62,11 +70,18 @@ Recommended option: deploy with the included `Dockerfile`.
 Set these environment variables in Coolify:
 
 - `ZAI_TOKEN`
+- `DEEPSEEK_TOKEN`
+- `DEEPSEEK_COOKIE` if DeepSeek returns auth/challenge errors
 - `ZAI_MODEL`
+- `DEEPSEEK_MODEL=default`
 - `ZAI_FE_VERSION`
 - `PROXY_BEARER_TOKEN`
 - `ZAI_DELETE_CHAT_AFTER_RESPONSE=true`
 - `ZAI_MIN_REQUEST_INTERVAL_MS=2000`
+- `DEEPSEEK_DELETE_CHAT_AFTER_RESPONSE=true`
+- `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=2000`
+- `DEEPSEEK_THINKING_ENABLED=true`
+- `DEEPSEEK_SEARCH_ENABLED=false`
 - `ZAI_ENABLE_THINKING=false`
 - `ZAI_AUTO_WEB_SEARCH=false`
 
@@ -88,6 +103,23 @@ curl http://localhost:8000/v1/chat/completions \
     ]
   }'
 ```
+
+## DeepSeek example request
+
+```bash
+curl http://localhost:8000/deepseek/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_PROXY_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-chat",
+    "messages": [
+      {"role": "system", "content": "Be concise."},
+      {"role": "user", "content": "Write one sentence about Istanbul."}
+    ]
+  }'
+```
+
+For Expert mode, use `"model": "deepseek-reasoner"` or `"model": "expert"`.
 
 ## Example `responses` request
 
@@ -142,10 +174,16 @@ curl -X DELETE http://localhost:8000/zai/chat/CHAT_ID_FROM_PREVIOUS_RESPONSE \
 
 ## n8n
 
-Use the base URL:
+Use the z.ai base URL:
 
 ```text
 http://YOUR_HOST:8000/v1
+```
+
+Use the DeepSeek base URL:
+
+```text
+http://YOUR_HOST:8000/deepseek/v1
 ```
 
 If you set `PROXY_BEARER_TOKEN` or `ZAI_PROXY_API_KEY`, send it as:
@@ -157,10 +195,11 @@ Authorization: Bearer YOUR_PROXY_TOKEN
 ## Limits
 
 - This proxy currently creates a fresh z.ai chat for each request.
-- That temporary chat is deleted after the response by default.
+- z.ai and DeepSeek temporary chats are deleted after the response by default.
 - `/zai/chat` is the exception: it keeps the chat until you delete it.
 - It does not support `stream=true` on either endpoint.
 - It only supports text content parts.
+- DeepSeek web auth is browser-session based and may require refreshing `DEEPSEEK_TOKEN` or `DEEPSEEK_COOKIE`.
 
 ## Cleanup existing chats
 

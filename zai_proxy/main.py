@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .client import ZaiClient, ZaiUpstreamError
 from .config import Settings
+from .deepseek_client import DeepSeekClient, DeepSeekUpstreamError
 from .schemas import (
     ChatCompletionsRequest,
     ChatCompletionsResponse,
@@ -28,16 +29,20 @@ from .schemas import (
 
 
 settings = Settings.from_env()
-client = ZaiClient(settings)
+client = ZaiClient(settings) if settings.zai_token else None
+deepseek_client = DeepSeekClient(settings) if settings.deepseek_token else None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
-    await client.close()
+    if client:
+        await client.close()
+    if deepseek_client:
+        await deepseek_client.close()
 
 
-app = FastAPI(title="z.ai OpenAI Proxy", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="z.ai and DeepSeek OpenAI Proxy", version="0.2.0", lifespan=lifespan)
 
 
 def require_api_key(authorization: str | None = Header(default=None)) -> None:
@@ -52,21 +57,38 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
 @app.get("/")
 async def root() -> dict:
     return {
-        "name": "z.ai OpenAI Proxy",
+        "name": "z.ai and DeepSeek OpenAI Proxy",
         "endpoints": [
             "/v1/models",
             "/v1/chat/completions",
             "/v1/responses",
+            "/deepseek/v1/models",
+            "/deepseek/v1/chat/completions",
+            "/deepseek/v1/responses",
             "/zai/chat",
             "/healthz",
+            "/deepseek/healthz",
         ],
     }
 
 
 @app.get("/healthz")
 async def healthz(_: None = Depends(require_api_key)) -> dict:
+    zai_client = _require_zai_client()
     try:
-        data = await client.healthcheck()
+        data = await zai_client.healthcheck()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "upstream": data}
+
+
+@app.get("/deepseek/healthz")
+async def deepseek_healthz(_: None = Depends(require_api_key)) -> dict:
+    ds_client = _require_deepseek_client()
+    try:
+        data = await ds_client.healthcheck()
+    except DeepSeekUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"ok": True, "upstream": data}
@@ -74,8 +96,9 @@ async def healthz(_: None = Depends(require_api_key)) -> dict:
 
 @app.get("/v1/models", response_model=ModelsResponse)
 async def list_models(_: None = Depends(require_api_key)) -> ModelsResponse:
+    zai_client = _require_zai_client()
     try:
-        upstream_models = await client.list_models()
+        upstream_models = await zai_client.list_models()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -89,6 +112,16 @@ async def list_models(_: None = Depends(require_api_key)) -> ModelsResponse:
     return ModelsResponse(data=models)
 
 
+@app.get("/deepseek/v1/models", response_model=ModelsResponse)
+async def list_deepseek_models(_: None = Depends(require_api_key)) -> ModelsResponse:
+    ds_client = _require_deepseek_client()
+    models = [
+        ModelCard(id=model.id, owned_by=model.owned_by)
+        for model in await ds_client.list_models()
+    ]
+    return ModelsResponse(data=models)
+
+
 @app.post("/v1/chat/completions", response_model=ChatCompletionsResponse)
 async def chat_completions(
     request: ChatCompletionsRequest,
@@ -97,8 +130,9 @@ async def chat_completions(
     if request.stream:
         raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
 
+    zai_client = _require_zai_client()
     try:
-        completion = await client.complete(request)
+        completion = await zai_client.complete(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ZaiUpstreamError as exc:
@@ -126,6 +160,27 @@ async def chat_completions(
     )
 
 
+@app.post("/deepseek/v1/chat/completions", response_model=ChatCompletionsResponse)
+async def deepseek_chat_completions(
+    request: ChatCompletionsRequest,
+    _: None = Depends(require_api_key),
+) -> ChatCompletionsResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    ds_client = _require_deepseek_client()
+    try:
+        completion = await ds_client.complete(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DeepSeekUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return _chat_completion_response(completion)
+
+
 @app.post("/v1/responses", response_model=ResponsesResponse)
 async def responses(
     request: ResponsesRequest,
@@ -134,9 +189,10 @@ async def responses(
     if request.stream:
         raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
 
+    zai_client = _require_zai_client()
     try:
         chat_request = _responses_to_chat_request(request)
-        completion = await client.complete(chat_request)
+        completion = await zai_client.complete(chat_request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ZaiUpstreamError as exc:
@@ -165,6 +221,28 @@ async def responses(
     )
 
 
+@app.post("/deepseek/v1/responses", response_model=ResponsesResponse)
+async def deepseek_responses(
+    request: ResponsesRequest,
+    _: None = Depends(require_api_key),
+) -> ResponsesResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    ds_client = _require_deepseek_client()
+    try:
+        chat_request = _responses_to_chat_request(request)
+        completion = await ds_client.complete(chat_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DeepSeekUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return _responses_response(completion, request)
+
+
 @app.post("/zai/chat", response_model=ZaiChatResponse)
 async def zai_chat(
     request: ZaiChatRequest,
@@ -174,8 +252,9 @@ async def zai_chat(
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    zai_client = _require_zai_client()
     try:
-        completion = await client.complete_stateful(
+        completion = await zai_client.complete_stateful(
             prompt=prompt,
             chat_id=request.chat_id,
             model=request.model,
@@ -213,14 +292,70 @@ async def delete_zai_chat(
     chat_id: str,
     _: None = Depends(require_api_key),
 ) -> ZaiDeleteChatResponse:
+    zai_client = _require_zai_client()
     try:
-        deleted = await client.delete_chat(chat_id)
+        deleted = await zai_client.delete_chat(chat_id)
     except ZaiUpstreamError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return ZaiDeleteChatResponse(chat_id=chat_id, deleted=deleted)
+
+
+def _require_zai_client() -> ZaiClient:
+    if client is None:
+        raise HTTPException(status_code=503, detail="ZAI_TOKEN is not configured")
+    return client
+
+
+def _require_deepseek_client() -> DeepSeekClient:
+    if deepseek_client is None:
+        raise HTTPException(status_code=503, detail="DEEPSEEK_TOKEN is not configured")
+    return deepseek_client
+
+
+def _chat_completion_response(completion) -> ChatCompletionsResponse:
+    usage = completion.usage or {}
+    return ChatCompletionsResponse(
+        id=completion.id,
+        created=int(time.time()),
+        model=completion.model,
+        choices=[
+            Choice(
+                index=0,
+                message=OpenAIMessage(role="assistant", content=completion.content),
+                finish_reason="stop",
+            )
+        ],
+        usage=Usage(
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        ),
+    )
+
+
+def _responses_response(completion, request: ResponsesRequest) -> ResponsesResponse:
+    usage = completion.usage or {}
+    return ResponsesResponse(
+        id="resp_" + completion.id.removeprefix("chatcmpl-"),
+        created_at=int(time.time()),
+        model=completion.model,
+        output=[
+            ResponseOutputMessage(
+                id="msg_" + completion.id.removeprefix("chatcmpl-"),
+                content=[ResponseOutputText(text=completion.content)],
+            )
+        ],
+        output_text=completion.content,
+        usage=ResponseUsage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+        ),
+        metadata=request.metadata,
+    )
 
 
 def _responses_to_chat_request(request: ResponsesRequest) -> ChatCompletionsRequest:

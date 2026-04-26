@@ -1,7 +1,10 @@
 import httpx
 
 from zai_proxy.client import ZaiCapacityError, ZaiClient
-from zai_proxy.parser import parse_sse_completion
+from zai_proxy.config import _normalize_deepseek_token
+from zai_proxy.deepseek_client import DeepSeekClient
+from zai_proxy.deepseek_pow import _deepseek_hash_hex, solve_deepseek_pow
+from zai_proxy.parser import parse_deepseek_completion, parse_sse_completion
 from zai_proxy.utils import build_signature, build_sorted_payload
 
 
@@ -37,6 +40,58 @@ def test_sse_parser_collects_answer_and_usage():
         "completion_tokens": 2,
         "total_tokens": 12,
     }
+
+
+def test_deepseek_sse_parser_collects_answer_reasoning_and_ids():
+    raw = (
+        'event: ready\n'
+        'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n'
+        'data: {"v":{"response":{"fragments":[{"type":"THINK","content":"Reason"}]}}}\n\n'
+        'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"ing"}\n\n'
+        'data: {"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE","content":"pon"}]}\n\n'
+        'data: {"p":"response/fragments/-1/content","v":"g"}\n\n'
+        'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":12}]}\n\n'
+    )
+
+    parsed = parse_deepseek_completion(raw)
+
+    assert parsed.answer == "pong"
+    assert parsed.reasoning == "Reasoning"
+    assert parsed.usage == {"total_tokens": 12}
+    assert parsed.request_message_id == 1
+    assert parsed.response_message_id == 2
+
+
+def test_deepseek_pow_matches_captured_browser_worker_value():
+    digest = _deepseek_hash_hex(b"e0172917344540087a50_1777238475948_72006")
+
+    assert digest == "46b974fc7a992700f287b4c8e1092c7b522a4b1871bd85e8830ba54abe307f59"
+
+
+def test_deepseek_pow_hash_helper_can_build_easy_challenge():
+    challenge_hash = _deepseek_hash_hex(b"salt_123_0")
+    challenge = {
+        "algorithm": "DeepSeekHashV1",
+        "challenge": challenge_hash,
+        "salt": "salt",
+        "signature": "sig",
+        "difficulty": 1,
+        "expire_at": 123,
+        "target_path": "/api/v0/chat/completion",
+    }
+
+    assert solve_deepseek_pow(challenge).answer == 0
+
+
+def test_deepseek_model_aliases_are_resolved():
+    assert DeepSeekClient._resolve_model("deepseek-chat") == "default"
+    assert DeepSeekClient._resolve_model("deepseek-reasoner") == "expert"
+    assert DeepSeekClient._resolve_model("expert") == "expert"
+
+
+def test_deepseek_token_accepts_raw_json_or_bearer_value():
+    assert _normalize_deepseek_token('{"value":"abc","__version":"0"}') == "abc"
+    assert _normalize_deepseek_token("Bearer abc") == "abc"
 
 
 def test_system_messages_are_folded_into_next_user_message():
