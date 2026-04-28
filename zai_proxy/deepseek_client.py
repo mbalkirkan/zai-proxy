@@ -42,8 +42,8 @@ class DeepSeekClient:
         self.settings = settings
         self.token = settings.deepseek_token
         self._http = httpx.AsyncClient(timeout=180.0)
-        self._request_lock = asyncio.Lock()
-        self._next_request_time = 0.0
+        self._completion_lock = asyncio.Lock()
+        self._next_completion_time = 0.0
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -77,6 +77,15 @@ class DeepSeekClient:
         return data.get("code") == 0 and (data.get("data") or {}).get("biz_code") == 0
 
     async def complete(self, request: ChatCompletionsRequest) -> UpstreamCompletion:
+        async with self._completion_lock:
+            await self._wait_for_completion_slot()
+            try:
+                return await self._complete(request)
+            finally:
+                interval = max(0.0, self.settings.deepseek_min_request_interval_ms / 1000)
+                self._next_completion_time = asyncio.get_running_loop().time() + interval
+
+    async def _complete(self, request: ChatCompletionsRequest) -> UpstreamCompletion:
         if any(message.role == "tool" for message in request.messages):
             raise ValueError("tool role messages are not supported by this proxy")
 
@@ -164,23 +173,18 @@ class DeepSeekClient:
         if not isinstance(challenge, dict):
             raise DeepSeekUpstreamError("DeepSeek did not return a PoW challenge")
 
-        answer = solve_deepseek_pow(challenge)
+        answer = await asyncio.to_thread(solve_deepseek_pow, challenge)
         payload = json.dumps(answer.as_header_payload(), separators=(",", ":"))
         return base64.b64encode(payload.encode("utf-8")).decode("ascii")
 
     async def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
-        async with self._request_lock:
-            loop = asyncio.get_running_loop()
-            now = loop.time()
-            delay = self._next_request_time - now
-            if delay > 0:
-                await asyncio.sleep(delay)
+        return await self._http.request(method, url, **kwargs)
 
-            response = await self._http.request(method, url, **kwargs)
-
-            interval = max(0.0, self.settings.deepseek_min_request_interval_ms / 1000)
-            self._next_request_time = loop.time() + interval
-            return response
+    async def _wait_for_completion_slot(self) -> None:
+        loop = asyncio.get_running_loop()
+        delay = self._next_completion_time - loop.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     def _base_headers(self, *, pow_response: str | None = None) -> dict[str, str]:
         headers = {

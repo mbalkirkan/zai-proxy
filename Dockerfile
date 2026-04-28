@@ -1,3 +1,12 @@
+FROM python:3.12-slim AS pow-builder
+
+WORKDIR /build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY zai_proxy/deepseek_pow_solver.c .
+RUN gcc -O3 -std=c11 deepseek_pow_solver.c -o deepseek-pow-solver
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,6 +21,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY --from=pow-builder /build/deepseek-pow-solver /usr/local/bin/deepseek-pow-solver
 
 EXPOSE 8000
 

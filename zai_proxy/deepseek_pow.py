@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 
@@ -39,6 +44,7 @@ _ROUND_CONSTANTS = (
     0x0000000080000001,
     0x8000000080008008,
 )
+_SOLVER_BINARY: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +84,9 @@ def solve_deepseek_pow(challenge: dict[str, Any]) -> DeepSeekPowAnswer:
     if difficulty <= 0:
         raise ValueError("DeepSeek PoW challenge has invalid difficulty")
 
-    answer = _solve_hash(challenge_hex, salt, expire_at, difficulty)
+    answer = _solve_hash_fast(challenge_hex, salt, expire_at, difficulty)
+    if answer is None:
+        answer = _solve_hash(challenge_hex, salt, expire_at, difficulty)
     if answer is None:
         raise ValueError("Could not solve DeepSeek PoW challenge")
 
@@ -90,6 +98,88 @@ def solve_deepseek_pow(challenge: dict[str, Any]) -> DeepSeekPowAnswer:
         signature=signature,
         target_path=target_path,
     )
+
+
+def _solve_hash_fast(
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+) -> int | None:
+    solver = _get_solver_binary()
+    if not solver:
+        return None
+
+    try:
+        completed = subprocess.run(
+            [
+                solver,
+                challenge_hex,
+                salt,
+                str(expire_at),
+                str(difficulty),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    try:
+        return int(completed.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _get_solver_binary() -> str | None:
+    global _SOLVER_BINARY
+    if _SOLVER_BINARY and Path(_SOLVER_BINARY).exists():
+        return _SOLVER_BINARY
+
+    configured = os.getenv("DEEPSEEK_POW_SOLVER_PATH", "").strip()
+    if configured and Path(configured).exists():
+        _SOLVER_BINARY = configured
+        return _SOLVER_BINARY
+
+    found = shutil.which("deepseek-pow-solver")
+    if found:
+        _SOLVER_BINARY = found
+        return _SOLVER_BINARY
+
+    source = Path(__file__).with_name("deepseek_pow_solver.c")
+    compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if not source.exists() or not compiler:
+        return None
+
+    target = Path(tempfile.gettempdir()) / f"deepseek-pow-solver-{int(source.stat().st_mtime)}"
+    if target.exists():
+        _SOLVER_BINARY = str(target)
+        return _SOLVER_BINARY
+
+    try:
+        subprocess.run(
+            [
+                compiler,
+                "-O3",
+                "-std=c11",
+                str(source),
+                "-o",
+                str(target),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except Exception:
+        return None
+
+    _SOLVER_BINARY = str(target)
+    return _SOLVER_BINARY
 
 
 def _solve_hash(

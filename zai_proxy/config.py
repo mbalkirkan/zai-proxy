@@ -65,7 +65,7 @@ class Settings:
             ),
             deepseek_min_request_interval_ms=max(
                 0,
-                int(os.getenv("DEEPSEEK_MIN_REQUEST_INTERVAL_MS", "2000")),
+                int(os.getenv("DEEPSEEK_MIN_REQUEST_INTERVAL_MS", "500")),
             ),
             deepseek_thinking_enabled=_as_bool(
                 os.getenv("DEEPSEEK_THINKING_ENABLED", "true")

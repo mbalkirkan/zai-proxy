@@ -37,6 +37,7 @@ Optional tuning:
 - `DEEPSEEK_TOKEN=...` is the DeepSeek `localStorage.userToken.value`
 - `DEEPSEEK_COOKIE=...` is optional, but may be required if DeepSeek/Cloudflare rejects server-side requests
 - `DEEPSEEK_MODEL=default` maps to Instant; `expert` maps to Expert
+- `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=500` spaces full completion requests without slowing internal DeepSeek calls
 
 ## Run
 
@@ -79,7 +80,7 @@ Set these environment variables in Coolify:
 - `ZAI_DELETE_CHAT_AFTER_RESPONSE=true`
 - `ZAI_MIN_REQUEST_INTERVAL_MS=2000`
 - `DEEPSEEK_DELETE_CHAT_AFTER_RESPONSE=true`
-- `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=2000`
+- `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=500`
 - `DEEPSEEK_THINKING_ENABLED=true`
 - `DEEPSEEK_SEARCH_ENABLED=false`
 - `ZAI_ENABLE_THINKING=false`
