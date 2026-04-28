@@ -1,10 +1,11 @@
 import httpx
 
 from zai_proxy.client import ZaiCapacityError, ZaiClient
-from zai_proxy.config import _normalize_deepseek_token
+from zai_proxy.config import _normalize_copilot_token, _normalize_deepseek_token
+from zai_proxy.copilot_client import CopilotClient
 from zai_proxy.deepseek_client import DeepSeekClient
 from zai_proxy.deepseek_pow import _deepseek_hash_hex, solve_deepseek_pow
-from zai_proxy.parser import parse_deepseek_completion, parse_sse_completion
+from zai_proxy.parser import parse_copilot_completion, parse_deepseek_completion, parse_sse_completion
 from zai_proxy.utils import build_signature, build_sorted_payload
 
 
@@ -62,6 +63,21 @@ def test_deepseek_sse_parser_collects_answer_reasoning_and_ids():
     assert parsed.response_message_id == 2
 
 
+def test_copilot_sse_parser_collects_answer_and_reasoning():
+    raw = (
+        'data: {"type":"thinking","phase":"reasoning","message":"Reasoning"}\n\n'
+        'data: {"type":"thinkingContent","body":"Plan"}\n\n'
+        'data: {"type":"content","body":"pon"}\n\n'
+        'data: {"type":"content","body":"g"}\n\n'
+        'data: {"type":"complete","id":"assistant-id"}\n\n'
+    )
+
+    parsed = parse_copilot_completion(raw)
+
+    assert parsed.answer == "pong"
+    assert parsed.reasoning == "ReasoningPlan"
+
+
 def test_deepseek_pow_matches_captured_browser_worker_value():
     digest = _deepseek_hash_hex(b"e0172917344540087a50_1777238475948_72006")
 
@@ -92,6 +108,18 @@ def test_deepseek_model_aliases_are_resolved():
 def test_deepseek_token_accepts_raw_json_or_bearer_value():
     assert _normalize_deepseek_token('{"value":"abc","__version":"0"}') == "abc"
     assert _normalize_deepseek_token("Bearer abc") == "abc"
+
+
+def test_copilot_model_aliases_are_resolved():
+    assert CopilotClient._resolve_model("Gemini 3.1 Pro") == "gemini-3.1-pro-preview"
+    assert CopilotClient._resolve_model("gpt-4.1-2025-04-14") == "gpt-4.1"
+    assert CopilotClient._resolve_model("grok code fast 1") == "grok-code-fast-1"
+
+
+def test_copilot_token_accepts_full_or_raw_value():
+    assert _normalize_copilot_token("GitHub-Bearer abc") == "abc"
+    assert _normalize_copilot_token("Bearer abc") == "abc"
+    assert _normalize_copilot_token("abc") == "abc"
 
 
 def test_system_messages_are_folded_into_next_user_message():

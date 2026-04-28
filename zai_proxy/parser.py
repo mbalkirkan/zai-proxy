@@ -163,6 +163,63 @@ def parse_deepseek_completion(raw: str) -> ParsedCompletion:
     )
 
 
+def parse_copilot_completion(raw: str) -> ParsedCompletion:
+    answer_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    usage: dict = {}
+    error: dict | None = None
+
+    for block in raw.split("\n\n"):
+        data_lines: list[str] = []
+
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").strip())
+
+        if not data_lines:
+            continue
+
+        payload = "\n".join(data_lines).strip()
+        if not payload or payload == "[DONE]":
+            continue
+
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(event, dict):
+            continue
+
+        event_type = event.get("type")
+        body = event.get("body")
+
+        if event_type == "content" and isinstance(body, str):
+            answer_parts.append(body)
+            continue
+
+        if event_type in {"thinking", "thinkingContent"}:
+            text = body if isinstance(body, str) else event.get("message")
+            if isinstance(text, str):
+                reasoning_parts.append(text)
+            continue
+
+        if event_type == "error":
+            detail = event.get("message") or event.get("body") or event.get("code") or "Copilot upstream error"
+            error = {"detail": str(detail), "code": event.get("code")}
+            continue
+
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+
+    return ParsedCompletion(
+        answer="".join(answer_parts).strip(),
+        reasoning="".join(reasoning_parts).strip(),
+        usage=usage,
+        error=error,
+    )
+
+
 def _append_deepseek_fragment(
     fragment: dict,
     fragments: list[dict],

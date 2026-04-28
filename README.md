@@ -1,6 +1,6 @@
-# z.ai and DeepSeek OpenAI Proxy
+# z.ai, DeepSeek, and Copilot OpenAI Proxy
 
-OpenAI-compatible proxy for `chat.z.ai` and `chat.deepseek.com`. z.ai uses `/v1`; DeepSeek uses `/deepseek/v1`.
+OpenAI-compatible proxy for `chat.z.ai`, `chat.deepseek.com`, and GitHub Copilot Chat. z.ai uses `/v1`; DeepSeek uses `/deepseek/v1`; Copilot uses `/copilot/v1`.
 
 ## What it supports
 
@@ -12,12 +12,16 @@ OpenAI-compatible proxy for `chat.z.ai` and `chat.deepseek.com`. z.ai uses `/v1`
 - `POST /deepseek/v1/chat/completions`
 - `POST /deepseek/v1/responses`
 - `GET /deepseek/v1/models`
+- `POST /copilot/v1/chat/completions`
+- `POST /copilot/v1/responses`
+- `GET /copilot/v1/models`
 - `GET /healthz`
 - `GET /deepseek/healthz`
+- `GET /copilot/healthz`
 - Non-stream responses only
 - Text-only messages
 - `system` / `developer` instructions are folded into the next user turn for z.ai compatibility
-- DeepSeek uses a rendered single prompt for message history because the web endpoint accepts one prompt per turn
+- DeepSeek and Copilot use a rendered single prompt for message history because their web endpoints accept one prompt per turn
 - Automatic retry on temporary upstream capacity errors
 - Automatic chat cleanup after each response
 - Built-in request spacing to reduce IP-ban risk from burst traffic
@@ -26,7 +30,7 @@ OpenAI-compatible proxy for `chat.z.ai` and `chat.deepseek.com`. z.ai uses `/v1`
 
 1. Create a virtual environment.
 2. Install dependencies from `requirements.txt`.
-3. Copy `.env.example` to `.env` and set `ZAI_TOKEN`, `DEEPSEEK_TOKEN`, or both.
+3. Copy `.env.example` to `.env` and set at least one of `ZAI_TOKEN`, `DEEPSEEK_TOKEN`, or `COPILOT_TOKEN`.
 4. Start the server.
 
 Optional tuning:
@@ -38,6 +42,9 @@ Optional tuning:
 - `DEEPSEEK_COOKIE=...` is optional, but may be required if DeepSeek/Cloudflare rejects server-side requests
 - `DEEPSEEK_MODEL=default` maps to Instant; `expert` maps to Expert
 - `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=500` spaces full completion requests without slowing internal DeepSeek calls
+- `COPILOT_TOKEN=...` is the GitHub Copilot `GitHub-Bearer` token copied from the browser request header
+- `COPILOT_MODEL=gemini-3.1-pro-preview` defaults to the currently selected Copilot web model
+- `COPILOT_MIN_REQUEST_INTERVAL_MS=500` spaces full Copilot completion requests without slowing internal Copilot calls
 
 ## Run
 
@@ -72,15 +79,19 @@ Set these environment variables in Coolify:
 
 - `ZAI_TOKEN`
 - `DEEPSEEK_TOKEN`
+- `COPILOT_TOKEN`
 - `DEEPSEEK_COOKIE` if DeepSeek returns auth/challenge errors
 - `ZAI_MODEL`
 - `DEEPSEEK_MODEL=default`
+- `COPILOT_MODEL=gemini-3.1-pro-preview`
 - `ZAI_FE_VERSION`
 - `PROXY_BEARER_TOKEN`
 - `ZAI_DELETE_CHAT_AFTER_RESPONSE=true`
 - `ZAI_MIN_REQUEST_INTERVAL_MS=2000`
 - `DEEPSEEK_DELETE_CHAT_AFTER_RESPONSE=true`
 - `DEEPSEEK_MIN_REQUEST_INTERVAL_MS=500`
+- `COPILOT_DELETE_THREAD_AFTER_RESPONSE=true`
+- `COPILOT_MIN_REQUEST_INTERVAL_MS=500`
 - `DEEPSEEK_THINKING_ENABLED=true`
 - `DEEPSEEK_SEARCH_ENABLED=false`
 - `ZAI_ENABLE_THINKING=false`
@@ -121,6 +132,23 @@ curl http://localhost:8000/deepseek/v1/chat/completions \
 ```
 
 For Expert mode, use `"model": "deepseek-reasoner"` or `"model": "expert"`.
+
+## Copilot example request
+
+```bash
+curl http://localhost:8000/copilot/v1/chat/completions \
+  -H 'Authorization: Bearer YOUR_PROXY_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gemini-3.1-pro-preview",
+    "messages": [
+      {"role": "system", "content": "Be concise."},
+      {"role": "user", "content": "Write one sentence about Istanbul."}
+    ]
+  }'
+```
+
+Available Copilot model ids include `gemini-3.1-pro-preview`, `gpt-5.2-codex`, `gpt-5.4-mini`, `gpt-5-mini`, `grok-code-fast-1`, `claude-haiku-4.5`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gpt-5.2`, `gpt-4.1`, and `gpt-4o`.
 
 ## Example `responses` request
 
@@ -187,6 +215,12 @@ Use the DeepSeek base URL:
 http://YOUR_HOST:8000/deepseek/v1
 ```
 
+Use the Copilot base URL:
+
+```text
+http://YOUR_HOST:8000/copilot/v1
+```
+
 If you set `PROXY_BEARER_TOKEN` or `ZAI_PROXY_API_KEY`, send it as:
 
 ```text
@@ -195,12 +229,12 @@ Authorization: Bearer YOUR_PROXY_TOKEN
 
 ## Limits
 
-- This proxy currently creates a fresh z.ai chat for each request.
-- z.ai and DeepSeek temporary chats are deleted after the response by default.
+- This proxy currently creates a fresh z.ai chat / DeepSeek chat / Copilot thread for each OpenAI-compatible request.
+- z.ai, DeepSeek, and Copilot temporary chats are deleted after the response by default.
 - `/zai/chat` is the exception: it keeps the chat until you delete it.
-- It does not support `stream=true` on either endpoint.
+- It does not support `stream=true` on these endpoints.
 - It only supports text content parts.
-- DeepSeek web auth is browser-session based and may require refreshing `DEEPSEEK_TOKEN` or `DEEPSEEK_COOKIE`.
+- DeepSeek and Copilot web auth is browser-session based and may require refreshing their token/cookie values.
 
 ## Cleanup existing chats
 

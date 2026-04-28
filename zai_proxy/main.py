@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .client import ZaiClient, ZaiUpstreamError
 from .config import Settings
+from .copilot_client import CopilotClient, CopilotUpstreamError
 from .deepseek_client import DeepSeekClient, DeepSeekUpstreamError
 from .schemas import (
     ChatCompletionsRequest,
@@ -31,6 +32,7 @@ from .schemas import (
 settings = Settings.from_env()
 client = ZaiClient(settings) if settings.zai_token else None
 deepseek_client = DeepSeekClient(settings) if settings.deepseek_token else None
+copilot_client = CopilotClient(settings) if settings.copilot_token else None
 
 
 @asynccontextmanager
@@ -40,9 +42,11 @@ async def lifespan(_: FastAPI):
         await client.close()
     if deepseek_client:
         await deepseek_client.close()
+    if copilot_client:
+        await copilot_client.close()
 
 
-app = FastAPI(title="z.ai and DeepSeek OpenAI Proxy", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="z.ai, DeepSeek, and Copilot OpenAI Proxy", version="0.3.0", lifespan=lifespan)
 
 
 def require_api_key(authorization: str | None = Header(default=None)) -> None:
@@ -57,7 +61,7 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
 @app.get("/")
 async def root() -> dict:
     return {
-        "name": "z.ai and DeepSeek OpenAI Proxy",
+        "name": "z.ai, DeepSeek, and Copilot OpenAI Proxy",
         "endpoints": [
             "/v1/models",
             "/v1/chat/completions",
@@ -65,9 +69,13 @@ async def root() -> dict:
             "/deepseek/v1/models",
             "/deepseek/v1/chat/completions",
             "/deepseek/v1/responses",
+            "/copilot/v1/models",
+            "/copilot/v1/chat/completions",
+            "/copilot/v1/responses",
             "/zai/chat",
             "/healthz",
             "/deepseek/healthz",
+            "/copilot/healthz",
         ],
     }
 
@@ -88,6 +96,18 @@ async def deepseek_healthz(_: None = Depends(require_api_key)) -> dict:
     try:
         data = await ds_client.healthcheck()
     except DeepSeekUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "upstream": data}
+
+
+@app.get("/copilot/healthz")
+async def copilot_healthz(_: None = Depends(require_api_key)) -> dict:
+    gh_client = _require_copilot_client()
+    try:
+        data = await gh_client.healthcheck()
+    except CopilotUpstreamError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -118,6 +138,16 @@ async def list_deepseek_models(_: None = Depends(require_api_key)) -> ModelsResp
     models = [
         ModelCard(id=model.id, owned_by=model.owned_by)
         for model in await ds_client.list_models()
+    ]
+    return ModelsResponse(data=models)
+
+
+@app.get("/copilot/v1/models", response_model=ModelsResponse)
+async def list_copilot_models(_: None = Depends(require_api_key)) -> ModelsResponse:
+    gh_client = _require_copilot_client()
+    models = [
+        ModelCard(id=model.id, owned_by=model.owned_by)
+        for model in await gh_client.list_models()
     ]
     return ModelsResponse(data=models)
 
@@ -181,6 +211,27 @@ async def deepseek_chat_completions(
     return _chat_completion_response(completion)
 
 
+@app.post("/copilot/v1/chat/completions", response_model=ChatCompletionsResponse)
+async def copilot_chat_completions(
+    request: ChatCompletionsRequest,
+    _: None = Depends(require_api_key),
+) -> ChatCompletionsResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    gh_client = _require_copilot_client()
+    try:
+        completion = await gh_client.complete(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CopilotUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return _chat_completion_response(completion)
+
+
 @app.post("/v1/responses", response_model=ResponsesResponse)
 async def responses(
     request: ResponsesRequest,
@@ -236,6 +287,28 @@ async def deepseek_responses(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DeepSeekUpstreamError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return _responses_response(completion, request)
+
+
+@app.post("/copilot/v1/responses", response_model=ResponsesResponse)
+async def copilot_responses(
+    request: ResponsesRequest,
+    _: None = Depends(require_api_key),
+) -> ResponsesResponse:
+    if request.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported by this proxy")
+
+    gh_client = _require_copilot_client()
+    try:
+        chat_request = _responses_to_chat_request(request)
+        completion = await gh_client.complete(chat_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CopilotUpstreamError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -313,6 +386,12 @@ def _require_deepseek_client() -> DeepSeekClient:
     if deepseek_client is None:
         raise HTTPException(status_code=503, detail="DEEPSEEK_TOKEN is not configured")
     return deepseek_client
+
+
+def _require_copilot_client() -> CopilotClient:
+    if copilot_client is None:
+        raise HTTPException(status_code=503, detail="COPILOT_TOKEN is not configured")
+    return copilot_client
 
 
 def _chat_completion_response(completion) -> ChatCompletionsResponse:
