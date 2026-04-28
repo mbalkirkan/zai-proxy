@@ -62,8 +62,8 @@ class ZaiClient:
             raise RuntimeError("Could not extract user id from ZAI_TOKEN")
         self._http = httpx.AsyncClient(timeout=120.0)
         self._models_cache: list[dict] | None = None
-        self._request_lock = asyncio.Lock()
-        self._next_request_time = 0.0
+        self._completion_lock = asyncio.Lock()
+        self._next_completion_time = 0.0
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -171,6 +171,29 @@ class ZaiClient:
         )
 
     async def _complete_turn(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None,
+        params: dict,
+        chat_id: str | None,
+        delete_after_response: bool,
+    ) -> UpstreamCompletion:
+        async with self._completion_lock:
+            await self._wait_for_completion_slot()
+            try:
+                return await self._complete_turn_unlocked(
+                    messages=messages,
+                    model=model,
+                    params=params,
+                    chat_id=chat_id,
+                    delete_after_response=delete_after_response,
+                )
+            finally:
+                interval = max(0.0, self.settings.min_request_interval_ms / 1000)
+                self._next_completion_time = asyncio.get_running_loop().time() + interval
+
+    async def _complete_turn_unlocked(
         self,
         *,
         messages: list[dict[str, str]],
@@ -608,18 +631,13 @@ class ZaiClient:
         return str(httpx.QueryParams(params))
 
     async def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
-        async with self._request_lock:
-            loop = asyncio.get_running_loop()
-            now = loop.time()
-            delay = self._next_request_time - now
-            if delay > 0:
-                await asyncio.sleep(delay)
+        return await self._http.request(method, url, **kwargs)
 
-            response = await self._http.request(method, url, **kwargs)
-
-            interval = max(0.0, self.settings.min_request_interval_ms / 1000)
-            self._next_request_time = loop.time() + interval
-            return response
+    async def _wait_for_completion_slot(self) -> None:
+        loop = asyncio.get_running_loop()
+        delay = self._next_completion_time - loop.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     def _base_headers(self, *, signature: str | None = None) -> dict[str, str]:
         headers = {

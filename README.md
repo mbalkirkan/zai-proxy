@@ -32,7 +32,7 @@ OpenAI-compatible proxy for `chat.z.ai` and `chat.deepseek.com`. z.ai uses `/v1`
 Optional tuning:
 
 - `ZAI_DELETE_CHAT_AFTER_RESPONSE=true` keeps temporary chats from piling up
-- `ZAI_MIN_REQUEST_INTERVAL_MS=2000` spaces outbound z.ai requests to avoid bursts
+- `ZAI_MIN_REQUEST_INTERVAL_MS=2000` spaces full z.ai completion requests without slowing internal z.ai calls
 - `PROXY_BEARER_TOKEN=...` enables bearer protection for incoming requests
 - `DEEPSEEK_TOKEN=...` is the DeepSeek `localStorage.userToken.value`
 - `DEEPSEEK_COOKIE=...` is optional, but may be required if DeepSeek/Cloudflare rejects server-side requests
